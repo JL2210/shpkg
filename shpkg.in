@@ -1,0 +1,161 @@
+#!/bin/bash
+
+set -e
+
+function help()
+{
+    echo
+    echo ' Usage:'
+    echo
+    echo '  '"`basename $0`"' [options] [package]'
+    echo
+    echo ' Options:'
+    echo
+    echo '  -i, --install [package]:'
+    echo '  Install selected package file'
+    echo
+    echo '  -l, --list:'
+    echo '  List installed packages'
+    echo
+    echo '  -r, --remove [package]:'
+    echo '  Remove specified package(s)'
+    echo
+    echo '  --version:'
+    echo '  Show ShPkg version'
+    echo
+    echo 'ShPkg version @VERSION@'
+    echo
+}
+
+case "x$1" in
+  x--version)
+    echo "ShPkg Version @VERSION@"
+    exit 0;;
+  x-i|x--install)
+    for (( i = "$#"; i > 1; i-- )); do
+      PWD_HOLD="`realpath .`"
+      SHK="`realpath ${!i}`"
+      if { echo ${SHK} | fgrep -i .deb >/dev/null; }; then
+        USE_DPKG=1
+      fi
+      pkgname_hold="`echo ${SHK%.*}`" || { echo 'Invalid package format!' && exit 1; }
+      pkgname="`basename ${pkgname_hold} | \
+                cut -d_ -f1`"
+      mkdir -p \
+               @LOCALSTATEDIR@/tmp/shpkg/${pkgname}/data/ \
+               @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}/ \
+               @LOCALSTATEDIR@/lib/shpkg/${pkgname}/
+      cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}
+      echo
+      echo 'Preparing to unpack '"`basename ${SHK}`"'...'
+      ar x "${SHK}" 2>/dev/null || { echo "${SHK}: Not a valid ar archive" >/dev/stderr && exit 1; }
+      if [[ "${USE_DPKG}" != 1 ]]; then
+        sha256sum -c ${pkgname}.sha256sum &>/dev/null || { echo 'Checksum mismatch!' && exit 1; }
+      fi
+      echo 'Unpacking '"`basename ${SHK}`"'...'
+      tar xpf data.tar* -C data/
+      tar xpf control.tar* -C @LOCALSTATEDIR@/lib/shpkg/${pkgname}/
+      cd data/
+      if [[ -e "@LOCALSTATEDIR@/lib/shpkg/${pkgname}/md5sums" ]]; then
+        md5sum -c @LOCALSTATEDIR@/lib/shpkg/${pkgname}/md5sums &>/dev/null || { echo 'Checksum mismatch!' && exit 1; }
+      fi
+      find . -not -type d > @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.filelist
+      find . -type d | sed '1d' > @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.directorylist
+      if [[ -e @LOCALSTATEDIR@/lib/shpkg/${pkgname}.filelist ]]; then
+        awk 'NR==FNR{a[$0]=1;next}!a[$0]' \
+             @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.filelist \
+             @LOCALSTATEDIR@/lib/shpkg/${pkgname}.filelist \
+           > @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-files.diff
+      fi
+      if [[ -e @LOCALSTATEDIR@/lib/shpkg/${pkgname}.directorylist ]]; then
+        awk 'NR==FNR{a[$0]=1;next}!a[$0]' \
+             @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.directorylist \
+             @LOCALSTATEDIR@/lib/shpkg/${pkgname}.directorylist \
+           > @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-dirs.diff
+      fi
+      cd ../
+      for file in {conffiles,control,md5sums,preinst,postinst,prerm,postrm}; do
+        if [[ -e "@LOCALSTATEDIR@/lib/shpkg/${pkgname}/${file}" ]]; then
+          mv @LOCALSTATEDIR@/lib/shpkg/${pkgname}/${file} @LOCALSTATEDIR@/lib/shpkg/${pkgname}.${file}
+        fi
+      done
+      echo 'Setting up '"`basename ${pkgname_hold} | sed 's,_,-,g'`"'...'
+      if [[ -f "@LOCALSTATEDIR@/lib/shpkg/${pkgname}.preinst" ]]; then
+        cd /
+        @LOCALSTATEDIR@/lib/shpkg/${pkgname}.preinst
+        cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}
+      fi
+      rmdir @LOCALSTATEDIR@/lib/shpkg/${pkgname}
+      cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}/data/
+      echo 'Installing...'
+      tar cpf - . | tar xpf - -C /
+      echo 'Removing old versions...'
+      if [[ -f @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-files.diff ]]; then
+        for file in `cat @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-files.diff`; do
+          cd /
+          rm -f ${file}
+          cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}/data/
+        done
+      fi
+      if [[ -f @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-dirs.diff ]]; then
+        for dir in `cat @LOCALSTATEDIR@/tmp/shpkg/${pkgname}-dirs.diff`; do
+          cd /
+          rmdir -p ${dir} 2>/dev/null || true
+          cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}/data/
+        done
+      fi
+      echo 'Configuring '"`basename ${pkgname_hold} | sed 's,_,-,g'`"'...'
+      if [[ -f "@LOCALSTATEDIR@/lib/shpkg/${pkgname}.postinst" ]]; then
+        cd /
+        @LOCALSTATEDIR@/lib/shpkg/${pkgname}.postinst
+        cd @LOCALSTATEDIR@/tmp/shpkg/${pkgname}
+      fi
+      if [[ -f @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.filelist ]]; then
+        mv @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.filelist @LOCALSTATEDIR@/lib/shpkg/
+      fi
+      if [[ -f @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.directorylist ]]; then
+        mv @LOCALSTATEDIR@/tmp/shpkg/lib/${pkgname}.directorylist @LOCALSTATEDIR@/lib/shpkg/
+      fi
+      rm -rf @LOCALSTATEDIR@/tmp/shpkg/
+      cd "${PWD_HOLD}"
+      echo 'Installed '"`basename ${pkgname_hold} | sed 's,_,-,g'`"'.'
+      sleep 0.5
+      echo 'Cleaning up...'
+      unset PWD_HOLD
+      unset SHK
+      unset USE_DPKG
+      unset pkgname_hold
+      unset pkgname
+      sync && sleep 0.5
+    done;;
+  x-l|x--list)
+    ls @LOCALSTATEDIR@/lib/shpkg/*.control 2>/dev/null | sed 's,@LOCALSTATEDIR@/lib/shpkg/,,g' | sed 's,\.control,,g'
+    true;;
+  x-r|x--remove)
+    for (( i = "$#"; i > 1; i-- )); do
+      if [[ -f "@LOCALSTATEDIR@/lib/shpkg/${!i}.prerm" ]]; then
+        cd /
+        @LOCALSTATEDIR@/lib/shpkg/${!i}.prerm
+      fi
+      for file in `cat @LOCALSTATEDIR@/lib/shpkg/${!i}.filelist`; do
+        cd /
+        rm -f ${file}
+      done
+      for dir in `cat @LOCALSTATEDIR@/lib/shpkg/${!i}.directorylist`; do
+        cd /
+        rmdir -p ${file} 2>/dev/null || true
+      done
+      if [[ -f "@LOCALSTATEDIR@/lib/shpkg/${!i}.postrm" ]]; then
+        cd /
+        @LOCALSTATEDIR@/lib/shpkg/${!i}.postrm
+      fi
+      rm -f @LOCALSTATEDIR@/lib/shpkg/${!i}.*
+    done;;
+  x|x-h|x-\?|x--help)
+    help
+    exit 0;;
+  x*)
+    echo "Unknown option: '${1}'"
+    help
+    exit 1;;
+esac
